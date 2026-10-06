@@ -18,6 +18,7 @@ function App() {
   const [students, setStudents] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [receivedResources, setReceivedResources] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const [subject, setSubject] = useState("");
   const [className, setClassName] = useState("");
@@ -330,6 +331,10 @@ function App() {
   };
 
   const handleFileSelect = async (event) => {
+    if (!classroom) {
+      alert("Only the classroom teacher can share resources.");
+      return;
+    }
     const files = Array.from(event.target.files);
 
     if (files.length === 0) {
@@ -926,7 +931,7 @@ function App() {
                 </h3>
 
                 <p className="mt-1 text-sm text-slate-500">
-                  Resources shared with this classroom will appear here.
+                  Resources shared with this classroom. Only the teacher can upload resources.
                 </p>
               </div>
 
@@ -1120,6 +1125,15 @@ function App() {
                       STUDENT
                     </span>
                   </div>
+                  <div className="mb-6">
+                    <input
+                      type="text"
+                      placeholder="Search resources..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
+                    />
+                  </div>
 
                   {/* Empty State */}
                   {receivedResources.length === 0 ? (
@@ -1136,7 +1150,20 @@ function App() {
                     </div>
                   ) : (
                     <div className="mt-8 space-y-4">
-                      {receivedResources.map((resource, index) => (
+                      {receivedResources
+                        .filter((resource) => {
+                          const query = searchQuery.toLowerCase().trim();
+
+                          if (!query) return true;
+
+                          return (
+                            resource.name?.toLowerCase().includes(query) ||
+                            resource.subject?.toLowerCase().includes(query) ||
+                            resource.className?.toLowerCase().includes(query) ||
+                            resource.topic?.toLowerCase().includes(query)
+                          );
+                        })
+                        .map((resource, index) => (
                         <div
                           key={`${resource.name}-${index}`}
                           className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.03] p-5"

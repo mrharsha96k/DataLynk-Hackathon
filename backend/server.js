@@ -20,6 +20,9 @@ const io = new Server(server, {
 // Store active classrooms
 const classrooms = new Map();
 
+// Store classrooms created by each teacher socket
+// A teacher can have multiple active classrooms.
+
 // Generate 6-character room code
 function generateRoomCode() {
   const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
