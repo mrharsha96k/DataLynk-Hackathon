@@ -17,6 +17,8 @@ function App() {
   const [joinedClassroom, setJoinedClassroom] = useState(null);
   const [students, setStudents] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [receivedResources, setReceivedResources] = useState([]);
+
   const peerConnections = useRef(new Map());
   const dataChannels = useRef(new Map());
   const fileTransfers = useRef(new Map());
@@ -144,11 +146,7 @@ function App() {
           // Binary file chunk
           const chunk = event.data;
 
-          console.log(
-            "File chunk received:",
-            chunk.byteLength,
-            "bytes"
-          );
+          
 
           // Get the current file transfer
           const transfers = Array.from(fileTransfers.current.values());
@@ -163,9 +161,6 @@ function App() {
           transfer.chunks.push(chunk);
           transfer.receivedBytes += chunk.byteLength;
 
-          console.log(
-            `File progress: ${transfer.receivedBytes} / ${transfer.size} bytes`
-          );
 
           // File completely received
           if (transfer.receivedBytes >= transfer.size) {
@@ -174,16 +169,20 @@ function App() {
             });
 
             const url = URL.createObjectURL(blob);
+            setReceivedResources((currentResources) => [
+              ...currentResources,
+              {
+                name: transfer.name,
+                size: transfer.size,
+                mimeType: transfer.mimeType,
+                url: url,
+              },
+            ]);
 
             console.log("FILE RECEIVED SUCCESSFULLY:", transfer.name);
             console.log("Download URL:", url);
 
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = transfer.name;
-            link.click();
-
-            URL.revokeObjectURL(url);
+            // URL.revokeObjectURL(url);
 
             fileTransfers.current.delete(transfer.name);
           }
@@ -366,7 +365,7 @@ function App() {
           `Starting file transfer: ${file.name} → ${studentId}`
         );
 
-        const chunkSize = 16 * 1024; // 16 KB
+        const chunkSize = 64 * 1024; // 64 KB
         let offset = 0;
 
         while (offset < file.size) {
@@ -378,9 +377,6 @@ function App() {
 
           offset += chunk.byteLength;
 
-          console.log(
-            `Sending ${file.name}: ${offset} / ${file.size} bytes`
-          );
 
           // Prevent DataChannel buffer from becoming too large
           if (channel.bufferedAmount > 1024 * 1024) {
@@ -1088,21 +1084,52 @@ function App() {
                   </div>
 
                   {/* Empty State */}
-                  <div className="mt-8 rounded-2xl border border-dashed border-white/10 py-16 text-center">
+                  {receivedResources.length === 0 ? (
+                    <div className="mt-8 rounded-2xl border border-dashed border-white/10 py-16 text-center">
+                      <div className="text-5xl">📂</div>
 
-                    <div className="text-5xl">
-                      📂
+                      <h4 className="mt-4 text-lg font-bold">
+                        No resources yet
+                      </h4>
+
+                      <p className="mt-2 text-sm text-slate-500">
+                        Waiting for the teacher to share resources...
+                      </p>
                     </div>
+                  ) : (
+                    <div className="mt-8 space-y-4">
+                      {receivedResources.map((resource, index) => (
+                        <div
+                          key={`${resource.name}-${index}`}
+                          className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.03] p-5"
+                        >
+                          <div className="flex min-w-0 items-center gap-4">
+                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-cyan-400/10 text-2xl">
+                              📄
+                            </div>
 
-                    <h4 className="mt-4 text-lg font-bold">
-                      No resources yet
-                    </h4>
+                            <div className="min-w-0">
+                              <p className="truncate font-semibold">
+                                {resource.name}
+                              </p>
 
-                    <p className="mt-2 text-sm text-slate-500">
-                      Waiting for the teacher to share resources...
-                    </p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {(resource.size / (1024 * 1024)).toFixed(2)} MB
+                              </p>
+                            </div>
+                          </div>
 
-                  </div>
+                          <a
+                            href={resource.url}
+                            download={resource.name}
+                            className="ml-4 shrink-0 rounded-xl bg-cyan-400 px-4 py-2 text-sm font-bold text-[#041017] hover:bg-cyan-300"
+                          >
+                            Download
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                 </div>
 
