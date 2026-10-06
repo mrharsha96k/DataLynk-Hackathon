@@ -19,6 +19,10 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [receivedResources, setReceivedResources] = useState([]);
 
+  const [subject, setSubject] = useState("");
+  const [className, setClassName] = useState("");
+  const [topic, setTopic] = useState("");
+
   const peerConnections = useRef(new Map());
   const dataChannels = useRef(new Map());
   const fileTransfers = useRef(new Map());
@@ -135,6 +139,9 @@ function App() {
                 name: data.name,
                 size: data.size,
                 mimeType: data.mimeType,
+                subject: data.subject,
+                className: data.className,
+                topic: data.topic,
                 chunks: [],
                 receivedBytes: 0,
               });
@@ -175,6 +182,9 @@ function App() {
                 name: transfer.name,
                 size: transfer.size,
                 mimeType: transfer.mimeType,
+                subject: transfer.subject,
+                className: transfer.className,
+                topic: transfer.topic,
                 url: url,
               },
             ]);
@@ -318,6 +328,7 @@ function App() {
       }
     );
   };
+
   const handleFileSelect = async (event) => {
     const files = Array.from(event.target.files);
 
@@ -333,27 +344,7 @@ function App() {
       console.log(file.name, file.size, file.type);
     });
 
-    dataChannels.current.forEach((channel, studentId) => {
-      if (channel.readyState === "open") {
-        files.forEach((file) => {
-          const metadata = {
-            type: "file-metadata",
-            name: file.name,
-            size: file.size,
-            mimeType: file.type,
-          };
-
-          channel.send(JSON.stringify(metadata));
-
-          console.log(
-            "File metadata sent to student:",
-            studentId,
-            metadata
-          );
-        });
-      }
-    });
-    // Send the actual file
+    // Send files one by one
     for (const file of files) {
       for (const [studentId, channel] of dataChannels.current) {
         if (channel.readyState !== "open") {
@@ -365,7 +356,26 @@ function App() {
           `Starting file transfer: ${file.name} → ${studentId}`
         );
 
-        const chunkSize = 64 * 1024; // 64 KB
+        // Send metadata for THIS file
+        const metadata = {
+          type: "file-metadata",
+          name: file.name,
+          size: file.size,
+          mimeType: file.type,
+          subject: subject,
+          className: className,
+          topic: topic,
+        };
+
+        channel.send(JSON.stringify(metadata));
+
+        console.log(
+          `File metadata sent to student: ${studentId}`,
+          metadata
+        );
+
+        // Send THIS file
+        const chunkSize = 64 * 1024;
         let offset = 0;
 
         while (offset < file.size) {
@@ -376,7 +386,6 @@ function App() {
           channel.send(chunk);
 
           offset += chunk.byteLength;
-
 
           // Prevent DataChannel buffer from becoming too large
           if (channel.bufferedAmount > 1024 * 1024) {
@@ -409,7 +418,10 @@ function App() {
       }
     }
 
+    // Allow selecting the same files again
+    event.target.value = "";
   };
+
 
   return (
     <div className="min-h-screen overflow-hidden bg-[#050816] text-white">
@@ -789,6 +801,32 @@ function App() {
                     PDF, PPT, DOCX, ZIP, images, videos and source code
                   </p>
 
+                  <div className="mt-6 grid gap-4 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      placeholder="Subject"
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                      className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
+                    />
+
+                    <input
+                      type="text"
+                      placeholder="Class"
+                      value={className}
+                      onChange={(e) => setClassName(e.target.value)}
+                      className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
+                    />
+
+                    <input
+                      type="text"
+                      placeholder="Topic"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
+                    />
+                  </div>
+
                   <label
                     htmlFor="resource-files"
                     className="mt-6 inline-block cursor-pointer rounded-xl bg-cyan-400 px-6 py-3 font-bold text-[#041017] transition hover:bg-cyan-300"
@@ -1111,6 +1149,18 @@ function App() {
                             <div className="min-w-0">
                               <p className="truncate font-semibold">
                                 {resource.name}
+                              </p>
+
+                              <p className="mt-1 text-xs text-slate-400">
+                                Subject: {resource.subject}
+                              </p>
+
+                              <p className="text-xs text-slate-400">
+                                Class: {resource.className}
+                              </p>
+
+                              <p className="text-xs text-slate-400">
+                                Topic: {resource.topic}
                               </p>
 
                               <p className="mt-1 text-xs text-slate-500">
