@@ -1,4 +1,420 @@
+import { useEffect, useRef, useState } from "react";
+import socket from "./socket";
+import {
+  createPeerConnection,
+  addIceCandidateSafely,
+  flushPendingIceCandidates,
+} from "./webrtc";
+
 function App() {
+  const [showCreate, setShowCreate] = useState(false);
+  const [teacherName, setTeacherName] = useState("");
+  const [classroom, setClassroom] = useState(null);
+
+  const [showJoin, setShowJoin] = useState(false);
+  const [studentName, setStudentName] = useState("");
+  const [roomCode, setRoomCode] = useState("");
+  const [joinedClassroom, setJoinedClassroom] = useState(null);
+  const [students, setStudents] = useState([]);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const peerConnections = useRef(new Map());
+  const dataChannels = useRef(new Map());
+  const fileTransfers = useRef(new Map());
+
+  useEffect(() => {
+    socket.on("connect", () => {
+      console.log("Connected to DataLynk server:", socket.id);
+    });
+
+    socket.on("student-joined", async (student) => {
+    console.log("Student joined:", student);
+
+    setStudents((currentStudents) => [
+      ...currentStudents,
+      student,
+    ]);
+
+    // Create WebRTC connection with the student
+    const peer = createPeerConnection({
+      targetId: student.id,
+      socket,
+      onDataChannel: (channel) => {
+        console.log("DataChannel ready with:", student.name);
+
+        channel.onopen = () => {
+          console.log("DataChannel OPEN with:", student.name);
+        };
+
+        channel.onclose = () => {
+          console.log("DataChannel CLOSED with:", student.name);
+        };
+      },
+      onConnectionStateChange: (state) => {
+        console.log(
+          `Connection with ${student.name}:`,
+          state
+        );
+      },
+    });
+
+    // Store the connection
+    peerConnections.current.set(student.id, peer);
+
+    // Create DataChannel
+    const channel = peer.createDataChannel("datalynk");
+
+    dataChannels.current.set(student.id, channel);
+
+    channel.onopen = () => {
+    console.log(
+      "Teacher DataChannel OPEN with:",
+      student.name
+    );
+
+    channel.send(
+      JSON.stringify({
+        type: "test",
+        message: "Hello from DataLynk Teacher!",
+      })
+    );
+  };
+
+    channel.onclose = () => {
+      console.log(
+        "Teacher DataChannel CLOSED with:",
+        student.name
+      );
+    };
+
+    // Create WebRTC offer
+    const offer = await peer.createOffer();
+
+    await peer.setLocalDescription(offer);
+
+    // Send offer through Socket.IO
+    socket.emit("webrtc-offer", {
+      target: student.id,
+      offer: peer.localDescription,
+    });
+
+    console.log(
+      "WebRTC offer sent to:",
+      student.name
+    );
+  });
+  // STUDENT: RECEIVE WEBRTC OFFER
+  socket.on("webrtc-offer", async ({ sender, offer }) => {
+    console.log("WebRTC offer received from teacher:", sender);
+
+    const peer = createPeerConnection({
+      targetId: sender,
+      socket,
+
+      onDataChannel: (channel) => {
+        console.log("DataChannel received from teacher");
+
+        channel.onopen = () => {
+          console.log("Student DataChannel OPEN");
+        };
+
+        channel.binaryType = "arraybuffer";
+
+        channel.onmessage = (event) => {
+          // Text message
+          if (typeof event.data === "string") {
+            const data = JSON.parse(event.data);
+
+            console.log("Message received from teacher:", data);
+
+            if (data.type === "file-metadata") {
+              console.log("File metadata received:", data);
+
+              fileTransfers.current.set(data.name, {
+                name: data.name,
+                size: data.size,
+                mimeType: data.mimeType,
+                chunks: [],
+                receivedBytes: 0,
+              });
+            }
+
+            return;
+          }
+
+          // Binary file chunk
+          const chunk = event.data;
+
+          console.log(
+            "File chunk received:",
+            chunk.byteLength,
+            "bytes"
+          );
+
+          // Get the current file transfer
+          const transfers = Array.from(fileTransfers.current.values());
+
+          if (transfers.length === 0) {
+            console.warn("Received chunk but no file transfer exists.");
+            return;
+          }
+
+          const transfer = transfers[transfers.length - 1];
+
+          transfer.chunks.push(chunk);
+          transfer.receivedBytes += chunk.byteLength;
+
+          console.log(
+            `File progress: ${transfer.receivedBytes} / ${transfer.size} bytes`
+          );
+
+          // File completely received
+          if (transfer.receivedBytes >= transfer.size) {
+            const blob = new Blob(transfer.chunks, {
+              type: transfer.mimeType,
+            });
+
+            const url = URL.createObjectURL(blob);
+
+            console.log("FILE RECEIVED SUCCESSFULLY:", transfer.name);
+            console.log("Download URL:", url);
+
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = transfer.name;
+            link.click();
+
+            URL.revokeObjectURL(url);
+
+            fileTransfers.current.delete(transfer.name);
+          }
+        };
+
+        channel.onclose = () => {
+          console.log("Student DataChannel CLOSED");
+        };
+      },
+
+      onConnectionStateChange: (state) => {
+        console.log("Student WebRTC connection:", state);
+      },
+    });
+
+    peerConnections.current.set(sender, peer);
+
+    await peer.setRemoteDescription(offer);
+    await flushPendingIceCandidates(peer);
+
+    const answer = await peer.createAnswer();
+
+    await peer.setLocalDescription(answer);
+
+    socket.emit("webrtc-answer", {
+      target: sender,
+      answer: peer.localDescription,
+    });
+
+    console.log("WebRTC answer sent to teacher");
+  });
+
+  // RECEIVE WEBRTC ANSWER
+  socket.on("webrtc-answer", async ({ sender, answer }) => {
+    const peer = peerConnections.current.get(sender);
+
+    if (!peer) {
+      console.error("Peer connection not found for:", sender);
+      return;
+    }
+
+    await peer.setRemoteDescription(answer);
+    await flushPendingIceCandidates(peer);
+
+    console.log("WebRTC answer received from:", sender);
+  });
+
+  // RECEIVE ICE CANDIDATES
+  socket.on("webrtc-ice-candidate", async ({ sender, candidate }) => {
+    const peer = peerConnections.current.get(sender);
+
+    if (!peer) {
+      console.warn("Peer not ready for ICE candidate:", sender);
+      return;
+    }
+
+    try {
+      await addIceCandidateSafely(peer, candidate);
+    } catch (error) {
+      console.error("Failed to add ICE candidate:", error);
+    }
+  });
+
+    socket.on("student-left", (student) => {
+      console.log("Student left:", student);
+
+      setStudents((currentStudents) =>
+        currentStudents.filter(
+          (existingStudent) => existingStudent.id !== student.id
+        )
+      );
+    });
+
+    return () => {
+      socket.off("connect");
+      socket.off("student-joined");
+      socket.off("student-left");
+
+      socket.off("webrtc-offer");
+      socket.off("webrtc-answer");
+      socket.off("webrtc-ice-candidate");
+    };
+  }, []);
+
+  const createClassroom = () => {
+    if (!teacherName.trim()) {
+      alert("Please enter your name");
+      return;
+    }
+
+    socket.emit(
+      "create-classroom",
+      { name: teacherName },
+      (response) => {
+        if (response.success) {
+          setClassroom(response);
+          setShowCreate(false);
+
+          console.log("Classroom created:", response.roomCode);
+          console.log("Role:", response.role);
+        }
+      }
+    );
+  };
+
+  const joinClassroom = () => {
+    if (!studentName.trim()) {
+      alert("Please enter your name");
+      return;
+    }
+
+    if (roomCode.trim().length !== 6) {
+      alert("Please enter a valid 6-character classroom code");
+      return;
+    }
+
+    socket.emit(
+      "join-classroom",
+      {
+        roomCode: roomCode.toUpperCase(),
+        name: studentName,
+      },
+      (response) => {
+        if (response.success) {
+          setJoinedClassroom(response);
+          setShowJoin(false);
+
+          console.log("Joined classroom:", response.roomCode);
+          console.log("Role:", response.role);
+        } else {
+          alert(response.message);
+        }
+      }
+    );
+  };
+  const handleFileSelect = async (event) => {
+    const files = Array.from(event.target.files);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    setSelectedFiles(files);
+
+    console.log("Selected files:");
+
+    files.forEach((file) => {
+      console.log(file.name, file.size, file.type);
+    });
+
+    dataChannels.current.forEach((channel, studentId) => {
+      if (channel.readyState === "open") {
+        files.forEach((file) => {
+          const metadata = {
+            type: "file-metadata",
+            name: file.name,
+            size: file.size,
+            mimeType: file.type,
+          };
+
+          channel.send(JSON.stringify(metadata));
+
+          console.log(
+            "File metadata sent to student:",
+            studentId,
+            metadata
+          );
+        });
+      }
+    });
+    // Send the actual file
+    for (const file of files) {
+      for (const [studentId, channel] of dataChannels.current) {
+        if (channel.readyState !== "open") {
+          console.warn("DataChannel not open:", studentId);
+          continue;
+        }
+
+        console.log(
+          `Starting file transfer: ${file.name} → ${studentId}`
+        );
+
+        const chunkSize = 16 * 1024; // 16 KB
+        let offset = 0;
+
+        while (offset < file.size) {
+          const chunk = await file
+            .slice(offset, offset + chunkSize)
+            .arrayBuffer();
+
+          channel.send(chunk);
+
+          offset += chunk.byteLength;
+
+          console.log(
+            `Sending ${file.name}: ${offset} / ${file.size} bytes`
+          );
+
+          // Prevent DataChannel buffer from becoming too large
+          if (channel.bufferedAmount > 1024 * 1024) {
+            await new Promise((resolve) => {
+              channel.bufferedAmountLowThreshold = 256 * 1024;
+
+              const checkBuffer = () => {
+                if (channel.bufferedAmount <= 256 * 1024) {
+                  channel.removeEventListener(
+                    "bufferedamountlow",
+                    checkBuffer
+                  );
+                  resolve();
+                }
+              };
+
+              channel.addEventListener(
+                "bufferedamountlow",
+                checkBuffer
+              );
+
+              checkBuffer();
+            });
+          }
+        }
+
+        console.log(
+          `FILE SENT SUCCESSFULLY: ${file.name} → ${studentId}`
+        );
+      }
+    }
+
+  };
+
   return (
     <div className="min-h-screen overflow-hidden bg-[#050816] text-white">
 
@@ -66,13 +482,19 @@ function App() {
             {/* Actions */}
             <div className="mt-10 flex flex-col gap-4 sm:flex-row">
 
-              <button className="group flex items-center justify-center gap-3 rounded-2xl bg-cyan-400 px-7 py-4 font-bold text-[#041017] shadow-xl shadow-cyan-400/10 transition hover:-translate-y-1 hover:bg-cyan-300">
+              <button
+                onClick={() => setShowCreate(true)}
+                className="group flex items-center justify-center gap-3 rounded-2xl bg-cyan-400 px-7 py-4 font-bold text-[#041017] shadow-xl shadow-cyan-400/10 transition hover:-translate-y-1 hover:bg-cyan-300"
+              >
                 <span className="text-xl">＋</span>
                 Create Classroom
                 <span className="transition group-hover:translate-x-1">→</span>
               </button>
 
-              <button className="flex items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-7 py-4 font-bold text-white backdrop-blur-xl transition hover:border-cyan-400/40 hover:bg-white/[0.06]">
+              <button
+                onClick={() => setShowJoin(true)}
+                className="flex items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-7 py-4 font-bold text-white backdrop-blur-xl transition hover:border-cyan-400/40 hover:bg-white/[0.06]"
+              >
                 <span>↗</span>
                 Join Classroom
               </button>
@@ -223,6 +645,470 @@ function App() {
         </section>
 
       </main>
+
+      {showCreate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0b1124] p-8 shadow-2xl">
+
+            <h2 className="text-2xl font-bold">
+              Create Classroom
+            </h2>
+
+            <p className="mt-2 text-sm text-slate-400">
+              Enter your name to create a classroom.
+            </p>
+
+            <input
+              type="text"
+              placeholder="Teacher name"
+              value={teacherName}
+              onChange={(e) => setTeacherName(e.target.value)}
+              className="mt-6 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-600 focus:border-cyan-400/50"
+            />
+
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={() => setShowCreate(false)}
+                className="flex-1 rounded-xl border border-white/10 px-4 py-3 font-semibold text-slate-300 hover:bg-white/5"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={createClassroom}
+                className="flex-1 rounded-xl bg-cyan-400 px-4 py-3 font-bold text-[#041017] hover:bg-cyan-300"
+              >
+                Create
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {classroom && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-[#050816]">
+
+          {/* Header */}
+          <header className="border-b border-white/5 bg-[#050816]/80 backdrop-blur-xl">
+            <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
+
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-400 font-black text-[#050816]">
+                  D
+                </div>
+
+                <div>
+                  <h1 className="text-xl font-bold">
+                    Data<span className="text-cyan-400">Lynk</span>
+                  </h1>
+
+                  <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+                    Teacher Dashboard
+                  </p>
+                </div>
+              </div>
+
+              <span className="rounded-full border border-cyan-400/20 bg-cyan-400/5 px-4 py-2 text-xs text-cyan-300">
+                👨‍🏫 ADMIN
+              </span>
+
+            </div>
+          </header>
+
+          {/* Dashboard */}
+          <main className="mx-auto max-w-7xl px-6 py-10">
+
+            {/* Classroom Header */}
+            <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-8 backdrop-blur-xl">
+
+              <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+
+                <div>
+                  <p className="text-sm text-slate-500">
+                    Welcome, {teacherName}
+                  </p>
+
+                  <h2 className="mt-2 text-4xl font-black">
+                    Your Classroom
+                  </h2>
+
+                  <p className="mt-2 text-slate-400">
+                    Share resources directly with your students.
+                  </p>
+                </div>
+
+                {/* Room Code */}
+                <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/5 px-8 py-5 text-center">
+                  <p className="text-xs text-slate-500">
+                    CLASSROOM CODE
+                  </p>
+
+                  <p className="mt-2 text-3xl font-black tracking-[0.25em] text-cyan-300">
+                    {classroom.roomCode}
+                  </p>
+
+                  <p className="mt-2 text-xs text-slate-500">
+                    Share this code with students
+                  </p>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Dashboard Grid */}
+            <div className="mt-8 grid gap-6 lg:grid-cols-3">
+
+              {/* Share Resources */}
+              <div className="lg:col-span-2 rounded-3xl border border-white/10 bg-white/[0.035] p-8">
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xl font-bold">
+                      Share Resources
+                    </h3>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Only you can share resources with this classroom.
+                    </p>
+                  </div>
+
+                  <span className="rounded-lg bg-emerald-400/10 px-3 py-2 text-xs text-emerald-400">
+                    TEACHER CONTROLLED
+                  </span>
+                </div>
+
+                {/* Upload Area */}
+                <div className="mt-8 rounded-2xl border border-dashed border-cyan-400/20 bg-cyan-400/[0.02] p-12 text-center">
+
+                  <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-400/10 text-3xl">
+                    📁
+                  </div>
+
+                  <h4 className="mt-5 text-lg font-bold">
+                    Select Resources
+                  </h4>
+
+                  <p className="mt-2 text-sm text-slate-500">
+                    PDF, PPT, DOCX, ZIP, images, videos and source code
+                  </p>
+
+                  <label
+                    htmlFor="resource-files"
+                    className="mt-6 inline-block cursor-pointer rounded-xl bg-cyan-400 px-6 py-3 font-bold text-[#041017] transition hover:bg-cyan-300"
+                  >
+                    Select Files
+                  </label>
+
+                  <input
+                    id="resource-files"
+                    type="file"
+                    multiple
+                    accept=".pdf,.ppt,.pptx,.doc,.docx,.txt,.zip,.rar,.png,.jpg,.jpeg,.gif,.mp4,.webm,.js,.jsx,.ts,.tsx,.java,.py,.c,.cpp,.html,.css"
+                    className="hidden"
+                    onChange={handleFileSelect}
+                  />
+
+                </div>
+
+              </div>
+
+              {/* Connected Students */}
+              <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-8">
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xl font-bold">
+                      Students
+                    </h3>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Connected to classroom
+                    </p>
+                  </div>
+
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-400/10 text-sm font-bold text-cyan-300">
+                    {students.length}
+                  </span>
+                </div>
+
+                {/* Empty State */}
+                {students.length === 0 ? (
+                  <div className="mt-8 rounded-2xl border border-white/5 bg-black/10 py-12 text-center">
+
+                    <div className="text-4xl">
+                      👨‍🎓
+                    </div>
+
+                    <p className="mt-4 font-semibold">
+                      Waiting for students
+                    </p>
+
+                    <p className="mt-2 text-xs leading-5 text-slate-500">
+                      Share the classroom code to let students join.
+                    </p>
+
+                  </div>
+                ) : (
+                  <div className="mt-6 space-y-3">
+
+                    {students.map((student) => (
+                      <div
+                        key={student.id}
+                        className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/10 p-4"
+                      >
+
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-400/10">
+                          👨‍🎓
+                        </div>
+
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold">
+                            {student.name}
+                          </p>
+
+                          <p className="mt-1 flex items-center gap-1 text-xs text-emerald-400">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Connected
+                          </p>
+                        </div>
+
+                      </div>
+                    ))}
+
+                  </div>
+                )}
+
+              </div>
+
+            </div>
+
+            {/* Resources List */}
+            <div className="mt-6 rounded-3xl border border-white/10 bg-white/[0.035] p-8">
+
+              <div>
+                <h3 className="text-xl font-bold">
+                  Shared Resources
+                </h3>
+
+                <p className="mt-1 text-sm text-slate-500">
+                  Resources shared with this classroom will appear here.
+                </p>
+              </div>
+
+              {selectedFiles.length === 0 ? (
+                <>
+                  <div className="text-4xl">
+                    📚
+                  </div>
+
+                  <p className="mt-4 font-semibold">
+                    No resources shared yet
+                  </p>
+
+                  <p className="mt-2 text-sm text-slate-500">
+                    Select files above to share them with your students.
+                  </p>
+                </>
+              ) : (
+                <div className="space-y-3 px-4">
+                  {selectedFiles.map((file, index) => (
+                    <div
+                      key={`${file.name}-${index}`}
+                      className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-left"
+                    >
+                      <div className="flex min-w-0 items-center gap-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-400/10">
+                          📄
+                        </div>
+
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold">
+                            {file.name}
+                          </p>
+
+                          <p className="mt-1 text-xs text-slate-500">
+                            {(file.size / (1024 * 1024)).toFixed(2)} MB
+                          </p>
+                        </div>
+                      </div>
+
+                      <span className="ml-4 shrink-0 rounded-lg bg-emerald-400/10 px-3 py-1 text-xs text-emerald-400">
+                        READY
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            </div>
+
+          </main>
+
+        </div>
+      )}
+
+
+
+
+     {showJoin && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
+              <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0b1124] p-8 shadow-2xl">
+
+                <h2 className="text-2xl font-bold">
+                  Join Classroom
+                </h2>
+
+                <p className="mt-2 text-sm text-slate-400">
+                  Enter your name and classroom code.
+                </p>
+
+                <input
+                  type="text"
+                  placeholder="Your name"
+                  value={studentName}
+                  onChange={(e) => setStudentName(e.target.value)}
+                  className="mt-6 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-600 focus:border-cyan-400/50"
+                />
+
+                <input
+                  type="text"
+                  placeholder="Classroom code"
+                  maxLength={6}
+                  value={roomCode}
+                  onChange={(e) =>
+                    setRoomCode(e.target.value.toUpperCase())
+                  }
+                  className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 uppercase tracking-[0.3em] text-white outline-none placeholder:tracking-normal placeholder:text-slate-600 focus:border-cyan-400/50"
+                />
+
+                <div className="mt-6 flex gap-3">
+
+                  <button
+                    onClick={() => setShowJoin(false)}
+                    className="flex-1 rounded-xl border border-white/10 px-4 py-3 font-semibold text-slate-300 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={joinClassroom}
+                    className="flex-1 rounded-xl bg-cyan-400 px-4 py-3 font-bold text-[#041017] hover:bg-cyan-300"
+                  >
+                    Join
+                  </button>
+
+                </div>
+
+              </div>
+            </div>
+          )}
+        {joinedClassroom && (
+            <div className="fixed inset-0 z-50 overflow-y-auto bg-[#050816]">
+              
+              {/* Header */}
+              <header className="border-b border-white/5 bg-[#050816]/80 backdrop-blur-xl">
+                <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
+                  
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-400 font-black text-[#050816]">
+                      D
+                    </div>
+
+                    <div>
+                      <h1 className="text-xl font-bold">
+                        Data<span className="text-cyan-400">Lynk</span>
+                      </h1>
+
+                      <p className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+                        Student Classroom
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="rounded-full border border-emerald-400/20 bg-emerald-400/5 px-4 py-2 text-xs text-emerald-400">
+                    ● Connected
+                  </span>
+
+                </div>
+              </header>
+
+              {/* Classroom Content */}
+              <main className="mx-auto max-w-5xl px-6 py-12">
+
+                {/* Classroom Info */}
+                <div className="rounded-3xl border border-white/10 bg-white/[0.035] p-8 backdrop-blur-xl">
+
+                  <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+
+                    <div>
+                      <p className="text-sm text-slate-500">
+                        Welcome, {studentName}
+                      </p>
+
+                      <h2 className="mt-2 text-3xl font-black">
+                        Classroom
+                      </h2>
+
+                      <p className="mt-2 text-slate-400">
+                        Teacher: {joinedClassroom.adminName}
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/5 px-8 py-5 text-center">
+                      <p className="text-xs text-slate-500">
+                        CLASSROOM CODE
+                      </p>
+
+                      <p className="mt-2 text-3xl font-black tracking-[0.25em] text-cyan-300">
+                        {joinedClassroom.roomCode}
+                      </p>
+                    </div>
+
+                  </div>
+                </div>
+
+                {/* Resources */}
+                <div className="mt-8 rounded-3xl border border-white/10 bg-white/[0.035] p-8">
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xl font-bold">
+                        Classroom Resources
+                      </h3>
+
+                      <p className="mt-1 text-sm text-slate-500">
+                        Resources shared by your teacher will appear here.
+                      </p>
+                    </div>
+
+                    <span className="rounded-lg bg-cyan-400/10 px-3 py-2 text-xs text-cyan-300">
+                      STUDENT
+                    </span>
+                  </div>
+
+                  {/* Empty State */}
+                  <div className="mt-8 rounded-2xl border border-dashed border-white/10 py-16 text-center">
+
+                    <div className="text-5xl">
+                      📂
+                    </div>
+
+                    <h4 className="mt-4 text-lg font-bold">
+                      No resources yet
+                    </h4>
+
+                    <p className="mt-2 text-sm text-slate-500">
+                      Waiting for the teacher to share resources...
+                    </p>
+
+                  </div>
+
+                </div>
+
+              </main>
+            </div>
+          )}
 
     </div>
   );
