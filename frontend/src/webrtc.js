@@ -9,6 +9,7 @@ const rtcConfig = {
 export function createPeerConnection({
   targetId,
   socket,
+  roomCode,
   onDataChannel,
   onConnectionStateChange,
 }) {
@@ -17,11 +18,13 @@ export function createPeerConnection({
   // Store ICE candidates that arrive too early
   peer.pendingIceCandidates = [];
 
+  // Send ICE candidates with classroom information
   peer.onicecandidate = (event) => {
     if (event.candidate) {
       socket.emit("webrtc-ice-candidate", {
         target: targetId,
         candidate: event.candidate,
+        roomCode,
       });
     }
   };

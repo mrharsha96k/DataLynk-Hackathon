@@ -20,9 +20,6 @@ const io = new Server(server, {
 // Store active classrooms
 const classrooms = new Map();
 
-// Store classrooms created by each teacher socket
-// A teacher can have multiple active classrooms.
-
 // Generate 6-character room code
 function generateRoomCode() {
   const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -66,9 +63,14 @@ io.on("connection", (socket) => {
 
     classrooms.set(roomCode, classroom);
 
+    // Teacher can belong to multiple classrooms
     socket.join(roomCode);
 
-    socket.data.roomCode = roomCode;
+    if (!socket.data.classrooms) {
+      socket.data.classrooms = new Set();
+    }
+
+    socket.data.classrooms.add(roomCode);
     socket.data.role = "admin";
     socket.data.name = name || "Teacher";
 
@@ -79,6 +81,7 @@ io.on("connection", (socket) => {
       success: true,
       roomCode,
       role: "admin",
+      classrooms: Array.from(socket.data.classrooms),
     });
   });
 
@@ -112,7 +115,6 @@ io.on("connection", (socket) => {
 
     console.log(`${student.name} joined classroom ${code}`);
 
-    // Tell the new student their classroom information
     callback({
       success: true,
       roomCode: code,
@@ -121,45 +123,142 @@ io.on("connection", (socket) => {
       students: classroom.students,
     });
 
-    // Tell everyone else that a new student joined
+    // Only students in THIS classroom receive the event
     socket.to(code).emit("student-joined", {
       id: socket.id,
       name: student.name,
     });
   });
-    // WEBRTC OFFER
-    socket.on("webrtc-offer", ({ target, offer }) => {
-        console.log(`WebRTC offer: ${socket.id} → ${target}`);
 
-        socket.to(target).emit("webrtc-offer", {
-        sender: socket.id,
-        offer,
-        });
+  // WEBRTC OFFER
+  socket.on("webrtc-offer", ({ target, offer, roomCode }) => {
+    console.log(
+      `WebRTC offer: ${socket.id} → ${target} | Room: ${roomCode}`
+    );
+
+    const classroom = classrooms.get(roomCode);
+
+    if (!classroom) {
+      console.warn("Invalid classroom for WebRTC offer:", roomCode);
+      return;
+    }
+
+    if (classroom.admin !== socket.id) {
+      console.warn("Unauthorized WebRTC offer attempt.");
+      return;
+    }
+
+    const studentExists = classroom.students.some(
+      (student) => student.id === target
+    );
+
+    if (!studentExists) {
+      console.warn("Student does not belong to classroom:", target);
+      return;
+    }
+
+    socket.to(target).emit("webrtc-offer", {
+      sender: socket.id,
+      offer,
+      roomCode,
     });
+  });
 
-    // WEBRTC ANSWER
-    socket.on("webrtc-answer", ({ target, answer }) => {
-        console.log(`WebRTC answer: ${socket.id} → ${target}`);
+  // WEBRTC ANSWER
+  socket.on("webrtc-answer", ({ target, answer, roomCode }) => {
+    console.log(
+      `WebRTC answer: ${socket.id} → ${target} | Room: ${roomCode}`
+    );
 
-        socket.to(target).emit("webrtc-answer", {
-        sender: socket.id,
-        answer,
-        });
+    const classroom = classrooms.get(roomCode);
+
+    if (!classroom) {
+      console.warn("Invalid classroom for WebRTC answer:", roomCode);
+      return;
+    }
+
+    const studentBelongsToRoom = classroom.students.some(
+      (student) => student.id === socket.id
+    );
+
+    if (!studentBelongsToRoom || classroom.admin !== target) {
+      console.warn("Unauthorized WebRTC answer attempt.");
+      return;
+    }
+
+    socket.to(target).emit("webrtc-answer", {
+      sender: socket.id,
+      answer,
+      roomCode,
     });
+  });
 
-    // WEBRTC ICE CANDIDATE
-    socket.on("webrtc-ice-candidate", ({ target, candidate }) => {
-        socket.to(target).emit("webrtc-ice-candidate", {
+  // WEBRTC ICE CANDIDATE
+  socket.on(
+    "webrtc-ice-candidate",
+    ({ target, candidate, roomCode }) => {
+      const classroom = classrooms.get(roomCode);
+
+      if (!classroom) {
+        console.warn("Invalid classroom for ICE candidate:", roomCode);
+        return;
+      }
+
+      const socketBelongsToRoom =
+        classroom.admin === socket.id ||
+        classroom.students.some(
+          (student) => student.id === socket.id
+        );
+
+      const targetBelongsToRoom =
+        classroom.admin === target ||
+        classroom.students.some(
+          (student) => student.id === target
+        );
+
+      if (!socketBelongsToRoom || !targetBelongsToRoom) {
+        console.warn("Blocked ICE candidate across classrooms.");
+        return;
+      }
+
+      socket.to(target).emit("webrtc-ice-candidate", {
         sender: socket.id,
         candidate,
-        });
-    });
+        roomCode,
+      });
+    }
+  );
 
   // DISCONNECT
   socket.on("disconnect", () => {
-    const roomCode = socket.data.roomCode;
-
     console.log("User disconnected:", socket.id);
+
+    // ADMIN LEFT → CLOSE ALL CLASSROOMS CREATED BY THIS TEACHER
+    if (
+      socket.data.role === "admin" &&
+      socket.data.classrooms
+    ) {
+      for (const roomCode of socket.data.classrooms) {
+        const classroom = classrooms.get(roomCode);
+
+        if (!classroom) {
+          continue;
+        }
+
+        console.log(`Admin left. Closing classroom ${roomCode}`);
+
+        io.to(roomCode).emit("classroom-closed", {
+          message: "The teacher has closed the classroom.",
+        });
+
+        classrooms.delete(roomCode);
+      }
+
+      return;
+    }
+
+    // STUDENT LEFT
+    const roomCode = socket.data.roomCode;
 
     if (!roomCode) {
       return;
@@ -171,20 +270,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // ADMIN LEFT → CLOSE CLASSROOM
-    if (socket.data.role === "admin") {
-      console.log(`Admin left. Closing classroom ${roomCode}`);
-
-      io.to(roomCode).emit("classroom-closed", {
-        message: "The teacher has closed the classroom.",
-      });
-
-      classrooms.delete(roomCode);
-
-      return;
-    }
-
-    // STUDENT LEFT
     classroom.students = classroom.students.filter(
       (student) => student.id !== socket.id
     );
@@ -199,5 +284,7 @@ io.on("connection", (socket) => {
 const PORT = 5000;
 
 server.listen(PORT, () => {
-  console.log(`DataLynk server running on http://localhost:${PORT}`);
+  console.log(
+    `DataLynk server running on http://localhost:${PORT}`
+  );
 });

@@ -24,6 +24,9 @@ function App() {
   const [className, setClassName] = useState("");
   const [topic, setTopic] = useState("");
 
+  const classroomRef = useRef(null);
+  const joinedClassroomRef = useRef(null);
+
   const peerConnections = useRef(new Map());
   const dataChannels = useRef(new Map());
   const fileTransfers = useRef(new Map());
@@ -45,6 +48,7 @@ function App() {
     const peer = createPeerConnection({
       targetId: student.id,
       socket,
+      roomCode: classroomRef.current?.roomCode,
       onDataChannel: (channel) => {
         console.log("DataChannel ready with:", student.name);
 
@@ -102,6 +106,7 @@ function App() {
     socket.emit("webrtc-offer", {
       target: student.id,
       offer: peer.localDescription,
+      roomCode: classroomRef.current?.roomCode,
     });
 
     console.log(
@@ -116,6 +121,7 @@ function App() {
     const peer = createPeerConnection({
       targetId: sender,
       socket,
+      roomCode: joinedClassroomRef.current?.roomCode,
 
       onDataChannel: (channel) => {
         console.log("DataChannel received from teacher");
@@ -221,6 +227,7 @@ function App() {
     socket.emit("webrtc-answer", {
       target: sender,
       answer: peer.localDescription,
+      roomCode: joinedClassroomRef.current?.roomCode,
     });
 
     console.log("WebRTC answer sent to teacher");
@@ -242,8 +249,15 @@ function App() {
   });
 
   // RECEIVE ICE CANDIDATES
-  socket.on("webrtc-ice-candidate", async ({ sender, candidate }) => {
+  socket.on(
+    "webrtc-ice-candidate",
+    async ({ sender, candidate, roomCode }) => {
     const peer = peerConnections.current.get(sender);
+
+    if (!roomCode) {
+      console.warn("ICE candidate missing classroom code.");
+      return;
+    }
 
     if (!peer) {
       console.warn("Peer not ready for ICE candidate:", sender);
@@ -290,6 +304,7 @@ function App() {
       (response) => {
         if (response.success) {
           setClassroom(response);
+          classroomRef.current = response;
           setShowCreate(false);
 
           console.log("Classroom created:", response.roomCode);
@@ -319,6 +334,7 @@ function App() {
       (response) => {
         if (response.success) {
           setJoinedClassroom(response);
+          joinedClassroomRef.current = response;
           setShowJoin(false);
 
           console.log("Joined classroom:", response.roomCode);
