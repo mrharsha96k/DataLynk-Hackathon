@@ -3,6 +3,11 @@ const rtcConfig = {
     {
       urls: "stun:stun.l.google.com:19302",
     },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
 };
 
@@ -30,13 +35,14 @@ export function createPeerConnection({
     }
   };
 
+  peer.oniceconnectionstatechange = () => {
+    console.log(
+      "ICE connection state:",
+      peer.iceConnectionState
+    );
+  };
+
   peer.onconnectionstatechange = () => {
-    peer.oniceconnectionstatechange = () => {
-      console.log(
-        "ICE connection state:",
-        peer.iceConnectionState
-      );
-    };
     console.log(
       `WebRTC connection with ${targetId}:`,
       peer.connectionState
