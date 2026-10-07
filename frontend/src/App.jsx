@@ -160,7 +160,7 @@ function App() {
   socket.on("webrtc-offer", async ({ sender, offer, roomCode }) => {
     console.log("WebRTC offer received from teacher:", sender);
 
-    const peer = createPeerConnection({
+    const peer = await createPeerConnection({
       targetId: sender,
       socket,
       roomCode: roomCode,
