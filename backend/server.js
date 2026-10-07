@@ -127,6 +127,7 @@ io.on("connection", (socket) => {
     socket.to(code).emit("student-joined", {
       id: socket.id,
       name: student.name,
+      roomCode: code,
     });
   });
 
@@ -277,6 +278,7 @@ io.on("connection", (socket) => {
     socket.to(roomCode).emit("student-left", {
       id: socket.id,
       name: socket.data.name,
+      roomCode: roomCode,
     });
   });
 });

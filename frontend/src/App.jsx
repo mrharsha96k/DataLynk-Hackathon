@@ -10,6 +10,8 @@ function App() {
   const [showCreate, setShowCreate] = useState(false);
   const [teacherName, setTeacherName] = useState("");
   const [classroom, setClassroom] = useState(null);
+  const [classrooms, setClassrooms] = useState([]);
+  const [activeClassroom, setActiveClassroom] = useState(null);
   
 
   const [showJoin, setShowJoin] = useState(false);
@@ -17,13 +19,15 @@ function App() {
   const [roomCode, setRoomCode] = useState("");
   const [joinedClassroom, setJoinedClassroom] = useState(null);
   const [students, setStudents] = useState([]);
+  const [studentsByRoom, setStudentsByRoom] = useState({});
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [resourcesByRoom, setResourcesByRoom] = useState({});
   const [receivedResources, setReceivedResources] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
 
-  const [subject, setSubject] = useState("");
-  const [className, setClassName] = useState("");
-  const [topic, setTopic] = useState("");
+
+
+  const [detailsByRoom, setDetailsByRoom] = useState({});
 
   const classroomRef = useRef(null);
   const joinedClassroomRef = useRef(null);
@@ -38,18 +42,48 @@ function App() {
     });
 
     socket.on("student-joined", async (student) => {
+      const currentRoomCode = student.roomCode;
+
+      console.log(
+        "Student joined classroom:",
+        currentRoomCode
+      );
+
     console.log("Student joined:", student);
 
-    setStudents((currentStudents) => [
-      ...currentStudents,
-      student,
-    ]);
+    setStudents((currentStudents) => {
+      const exists = currentStudents.some(
+        (item) =>
+          item.id === student.id &&
+          item.roomCode === student.roomCode
+      );
+
+      if (exists) return currentStudents;
+
+      return [...currentStudents, student];
+    });
+
+
+    setStudentsByRoom((current) => {
+      const roomStudents = current[student.roomCode] || [];
+
+      const exists = roomStudents.some(
+        (item) => item.id === student.id
+      );
+
+      if (exists) return current;
+
+      return {
+        ...current,
+        [student.roomCode]: [...roomStudents, student],
+      };
+    });
 
     // Create WebRTC connection with the student
     const peer = createPeerConnection({
       targetId: student.id,
       socket,
-      roomCode: classroomRef.current?.roomCode,
+      roomCode: student.roomCode,
       onDataChannel: (channel) => {
         console.log("DataChannel ready with:", student.name);
 
@@ -69,13 +103,16 @@ function App() {
       },
     });
 
-    // Store the connection
-    peerConnections.current.set(student.id, peer);
+    // Store the connection using classroom + student ID
+    const peerKey = `${student.roomCode}:${student.id}`;
+    peerConnections.current.set(peerKey, peer);
 
     // Create DataChannel
     const channel = peer.createDataChannel("datalynk");
 
-    dataChannels.current.set(student.id, channel);
+    const channelKey = `${student.roomCode}:${student.id}`;
+
+    dataChannels.current.set(channelKey, channel);
 
     channel.onopen = () => {
     console.log(
@@ -107,7 +144,7 @@ function App() {
     socket.emit("webrtc-offer", {
       target: student.id,
       offer: peer.localDescription,
-      roomCode: classroomRef.current?.roomCode,
+      roomCode: student.roomCode,
     });
 
     console.log(
@@ -115,14 +152,18 @@ function App() {
       student.name
     );
   });
+
+
+
+
   // STUDENT: RECEIVE WEBRTC OFFER
-  socket.on("webrtc-offer", async ({ sender, offer }) => {
+  socket.on("webrtc-offer", async ({ sender, offer, roomCode }) => {
     console.log("WebRTC offer received from teacher:", sender);
 
     const peer = createPeerConnection({
       targetId: sender,
       socket,
-      roomCode: joinedClassroomRef.current?.roomCode,
+      roomCode: roomCode,
 
       onDataChannel: (channel) => {
         console.log("DataChannel received from teacher");
@@ -216,7 +257,8 @@ function App() {
       },
     });
 
-    peerConnections.current.set(sender, peer);
+    const peerKey = `${roomCode}:${sender}`;
+    peerConnections.current.set(peerKey, peer);
 
     await peer.setRemoteDescription(offer);
     await flushPendingIceCandidates(peer);
@@ -228,15 +270,16 @@ function App() {
     socket.emit("webrtc-answer", {
       target: sender,
       answer: peer.localDescription,
-      roomCode: joinedClassroomRef.current?.roomCode,
+      roomCode: roomCode,
     });
 
     console.log("WebRTC answer sent to teacher");
   });
 
   // RECEIVE WEBRTC ANSWER
-  socket.on("webrtc-answer", async ({ sender, answer }) => {
-    const peer = peerConnections.current.get(sender);
+  socket.on("webrtc-answer", async ({ sender, answer, roomCode }) => {
+    const peerKey = `${roomCode}:${sender}`;
+    const peer = peerConnections.current.get(peerKey);
 
     if (!peer) {
       console.error("Peer connection not found for:", sender);
@@ -253,7 +296,8 @@ function App() {
   socket.on(
     "webrtc-ice-candidate",
     async ({ sender, candidate, roomCode }) => {
-    const peer = peerConnections.current.get(sender);
+    const peerKey = `${roomCode}:${sender}`;
+    const peer = peerConnections.current.get(peerKey);
 
     if (!roomCode) {
       console.warn("ICE candidate missing classroom code.");
@@ -277,9 +321,20 @@ function App() {
 
       setStudents((currentStudents) =>
         currentStudents.filter(
-          (existingStudent) => existingStudent.id !== student.id
+          (existingStudent) =>
+            !(
+              existingStudent.id === student.id &&
+              existingStudent.roomCode === student.roomCode
+            )
         )
       );
+
+      setStudentsByRoom((current) => ({
+        ...current,
+        [student.roomCode]: (current[student.roomCode] || []).filter(
+          (item) => item.id !== student.id
+        ),
+      }));
     });
 
     return () => {
@@ -304,6 +359,19 @@ function App() {
       { name: teacherName },
       (response) => {
         if (response.success) {
+          setClassrooms((currentClassrooms) => {
+            if (
+              currentClassrooms.some(
+                (item) => item.roomCode === response.roomCode
+              )
+            ) {
+              return currentClassrooms;
+            }
+
+            return [...currentClassrooms, response];
+          });
+
+          setActiveClassroom(response);
           setClassroom(response);
           classroomRef.current = response;
           setShowCreate(false);
@@ -336,19 +404,18 @@ function App() {
         if (response.success) {
           setJoinedClassroom(response);
           joinedClassroomRef.current = response;
+
           setShowJoin(false);
 
           console.log("Joined classroom:", response.roomCode);
           console.log("Role:", response.role);
-        } else {
-          alert(response.message);
         }
       }
     );
   };
 
   const handleFileSelect = async (event) => {
-    if (!classroom) {
+    if (!activeClassroom) {
       alert("Only the classroom teacher can share resources.");
       return;
     }
@@ -360,6 +427,16 @@ function App() {
 
     setSelectedFiles(files);
 
+    if (activeClassroom) {
+      setResourcesByRoom((current) => ({
+        ...current,
+        [activeClassroom.roomCode]: [
+          ...(current[activeClassroom.roomCode] || []),
+          ...files,
+        ],
+      }));
+    }
+
     console.log("Selected files:");
 
     files.forEach((file) => {
@@ -368,7 +445,16 @@ function App() {
 
     // Send files one by one
     for (const file of files) {
-      for (const [studentId, channel] of dataChannels.current) {
+      for (const [channelKey, channel] of dataChannels.current) {
+
+        const [channelRoomCode, studentId] =
+          channelKey.split(":");
+
+        // Only send to students in the ACTIVE classroom
+        if (channelRoomCode !== activeClassroom.roomCode) {
+          continue;
+        }
+
         if (channel.readyState !== "open") {
           console.warn("DataChannel not open:", studentId);
           continue;
@@ -384,9 +470,9 @@ function App() {
           name: file.name,
           size: file.size,
           mimeType: file.type,
-          subject: subject,
-          className: className,
-          topic: topic,
+          subject: detailsByRoom[activeClassroom.roomCode]?.subject || "",
+          className: detailsByRoom[activeClassroom.roomCode]?.className || "",
+          topic: detailsByRoom[activeClassroom.roomCode]?.topic || "",
         };
 
         channel.send(JSON.stringify(metadata));
@@ -486,7 +572,7 @@ function App() {
       {/* Main */}
       <main className="relative z-10 mx-auto max-w-7xl px-6">
 
-        <section className="grid min-h-[calc(100vh-81px)] items-center gap-16 py-16 lg:grid-cols-2">
+        <section className="grid min-h-[calc(85vh-81px)] items-center gap-16 py-12 lg:grid-cols-2">
 
           {/* LEFT */}
           <div>
@@ -613,25 +699,7 @@ function App() {
 
               </div>
 
-              {/* Network info */}
-              <div className="grid grid-cols-3 gap-3">
-
-                <div className="rounded-2xl border border-white/5 bg-black/20 p-4">
-                  <p className="text-lg font-bold">01</p>
-                  <p className="mt-1 text-[11px] text-slate-500">Teacher</p>
-                </div>
-
-                <div className="rounded-2xl border border-white/5 bg-black/20 p-4">
-                  <p className="text-lg font-bold">04</p>
-                  <p className="mt-1 text-[11px] text-slate-500">Students</p>
-                </div>
-
-                <div className="rounded-2xl border border-white/5 bg-black/20 p-4">
-                  <p className="text-lg font-bold text-emerald-400">P2P</p>
-                  <p className="mt-1 text-[11px] text-slate-500">Connection</p>
-                </div>
-
-              </div>
+            
 
             </div>
 
@@ -640,7 +708,7 @@ function App() {
         </section>
 
         {/* Bottom feature strip */}
-        <section className="grid gap-4 pb-12 md:grid-cols-3">
+        <section className="grid gap-4 pb-8 md:grid-cols-3">
 
           <div className="rounded-2xl border border-white/5 bg-white/[0.025] p-6">
             <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-400/10 text-cyan-400">
@@ -674,10 +742,78 @@ function App() {
 
         </section>
 
+            
+
+        {/* How DataLynk Works */}
+        <section className="mt-20 pb-16">
+          <div className="mb-10 text-center">
+            <p className="text-sm font-semibold uppercase tracking-widest text-cyan-400">
+              Simple Workflow
+            </p>
+
+            <h2 className="mt-2 text-3xl font-bold text-white md:text-4xl">
+              How DataLynk Works
+            </h2>
+
+            <p className="mt-3 text-slate-400">
+              Share classroom resources in just three simple steps.
+            </p>
+          </div>
+
+          <div className="relative grid gap-6 md:grid-cols-3">
+            <div className="pointer-events-none absolute left-[32%] right-[32%] top-[50%] hidden h-px bg-gradient-to-r from-cyan-400/20 via-cyan-400/60 to-cyan-400/20 md:block" />
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 transition duration-300 hover:-translate-y-2 hover:border-cyan-400/30 hover:bg-white/[0.05]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-cyan-400/10 text-sm font-bold text-cyan-400 ring-1 ring-cyan-400/20">
+                01
+              </div>
+              <h3 className="mt-3 text-xl font-semibold text-white">
+                Create Classroom
+              </h3>
+              <p className="mt-2 text-sm leading-6 text-slate-400">
+                Teacher creates a temporary classroom and gets a unique room code.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 transition duration-300 hover:-translate-y-2 hover:border-cyan-400/30 hover:bg-white/[0.05]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-cyan-400/10 text-sm font-bold text-cyan-400 ring-1 ring-cyan-400/20">
+                02
+              </div>
+              <h3 className="mt-3 text-xl font-semibold text-white">
+                Students Join
+              </h3>
+              <p className="mt-2 text-sm leading-6 text-slate-400">
+                Students join using the room code or QR code.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-6 transition duration-300 hover:-translate-y-2 hover:border-cyan-400/30 hover:bg-white/[0.05]">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-cyan-400/10 text-sm font-bold text-cyan-400 ring-1 ring-cyan-400/20">
+                03
+              </div>
+              <h3 className="mt-3 text-xl font-semibold text-white">
+                Share Directly
+              </h3>
+              <p className="mt-2 text-sm leading-6 text-slate-400">
+                Teacher shares resources directly with connected students.
+              </p>
+            </div>
+          </div>
+        </section>
+        
+
+      
+
       </main>
+      <footer className="border-t border-white/5 py-8 text-center">
+        <p className="text-sm text-slate-500">
+          © 2026 Data<span className="text-cyan-400">Lynk</span> •
+          Connect • Share • Transfer
+        </p>
+      </footer>
+      
 
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
           <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0b1124] p-8 shadow-2xl">
 
             <h2 className="text-2xl font-bold">
@@ -743,6 +879,17 @@ function App() {
                 👨‍🏫 ADMIN
               </span>
 
+              <button
+                type="button"
+                onClick={() => {
+                  setClassroom(null);
+                  setActiveClassroom(null);
+                }}
+                className="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-white/5"
+              >
+                ← Home
+              </button>
+
             </div>
           </header>
 
@@ -775,7 +922,7 @@ function App() {
                   </p>
 
                   <p className="mt-2 text-3xl font-black tracking-[0.25em] text-cyan-300">
-                    {classroom.roomCode}
+                    {activeClassroom?.roomCode}
                   </p>
 
                   <p className="mt-2 text-xs text-slate-500">
@@ -784,6 +931,38 @@ function App() {
                 </div>
 
               </div>
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowCreate(true)}
+                className="relative z-[100] cursor-pointer rounded-xl bg-cyan-400 px-5 py-3 text-sm font-bold text-[#041017] hover:bg-cyan-300"
+              >
+                ＋ Create Another Classroom
+              </button>
+            </div>
+
+            <div className="mt-6 flex overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03]">
+              {classrooms.map((item, index) => (
+                <button
+                  key={item.roomCode}
+                  type="button"
+                  onClick={() => {
+                    setActiveClassroom(item);
+                    setClassroom(item);
+                    setSelectedFiles(resourcesByRoom[item.roomCode] || []);
+                    setStudents(studentsByRoom[item.roomCode] || []);
+                  }}
+                  className={`min-w-[150px] px-6 py-4 text-sm font-semibold transition ${
+                    activeClassroom?.roomCode === item.roomCode
+                      ? "bg-cyan-400 text-[#041017]"
+                      : "text-slate-300 hover:bg-white/5"
+                  }`}
+                >
+                  Classroom {index + 1}
+                </button>
+              ))}
             </div>
 
             {/* Dashboard Grid */}
@@ -827,24 +1006,54 @@ function App() {
                     <input
                       type="text"
                       placeholder="Subject"
-                      value={subject}
-                      onChange={(e) => setSubject(e.target.value)}
+                      value={detailsByRoom[activeClassroom?.roomCode]?.subject || ""}
+                      onChange={(e) => {
+                        const value = e.target.value;
+
+                        setDetailsByRoom((current) => ({
+                          ...current,
+                          [activeClassroom.roomCode]: {
+                            ...(current[activeClassroom.roomCode] || {}),
+                            subject: value,
+                          },
+                        }));
+                      }}
                       className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
                     />
 
                     <input
                       type="text"
                       placeholder="Class"
-                      value={className}
-                      onChange={(e) => setClassName(e.target.value)}
+                      value={detailsByRoom[activeClassroom?.roomCode]?.className || ""}
+                      onChange={(e) => {
+                        const value = e.target.value;
+
+                        setDetailsByRoom((current) => ({
+                          ...current,
+                          [activeClassroom.roomCode]: {
+                            ...(current[activeClassroom.roomCode] || {}),
+                            className: value,
+                          },
+                        }));
+                      }}
                       className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
                     />
 
                     <input
                       type="text"
                       placeholder="Topic"
-                      value={topic}
-                      onChange={(e) => setTopic(e.target.value)}
+                      value={detailsByRoom[activeClassroom?.roomCode]?.topic || ""}
+                      onChange={(e) => {
+                        const value = e.target.value;
+
+                        setDetailsByRoom((current) => ({
+                          ...current,
+                          [activeClassroom.roomCode]: {
+                            ...(current[activeClassroom.roomCode] || {}),
+                            topic: value,
+                          },
+                        }));
+                      }}
                       className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-cyan-400/50"
                     />
                   </div>
@@ -884,12 +1093,16 @@ function App() {
                   </div>
 
                   <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-400/10 text-sm font-bold text-cyan-300">
-                    {students.length}
+                    {students.filter(
+                      (student) => student.roomCode === activeClassroom?.roomCode
+                    ).length}
                   </span>
                 </div>
 
                 {/* Empty State */}
-                {students.length === 0 ? (
+                {students.filter(
+                  (student) => student.roomCode === activeClassroom?.roomCode
+                ).length === 0 ? (
                   <div className="mt-8 rounded-2xl border border-white/5 bg-black/10 py-12 text-center">
 
                     <div className="text-4xl">
@@ -908,7 +1121,9 @@ function App() {
                 ) : (
                   <div className="mt-6 space-y-3">
 
-                    {students.map((student) => (
+                    {students
+                      .filter((student) => student.roomCode === activeClassroom?.roomCode)
+                      .map((student) => (
                       <div
                         key={student.id}
                         className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/10 p-4"
@@ -1006,9 +1221,8 @@ function App() {
 
 
 
-
      {showJoin && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 px-6 backdrop-blur-md">
               <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0b1124] p-8 shadow-2xl">
 
                 <h2 className="text-2xl font-bold">
@@ -1085,6 +1299,17 @@ function App() {
                   <span className="rounded-full border border-emerald-400/20 bg-emerald-400/5 px-4 py-2 text-xs text-emerald-400">
                     ● Connected
                   </span>
+                  
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setJoinedClassroom(null);
+                      setSearchQuery("");
+                    }}
+                    className="rounded-xl border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:border-cyan-400/40 hover:bg-white/5"
+                  >
+                    ← Home
+                  </button>
 
                 </div>
               </header>
@@ -1123,6 +1348,7 @@ function App() {
 
                   </div>
                 </div>
+
 
                 {/* Resources */}
                 <div className="mt-8 rounded-3xl border border-white/10 bg-white/[0.035] p-8">
