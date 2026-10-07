@@ -38,7 +38,7 @@ export async function createPeerConnection({
 
   // Send ICE candidates with classroom information
   peer.onicecandidate = (event) => {
-    console.log("ICE candidate:", event.candidate);
+    console.log("ICE candidate RAW:", event.candidate?.candidate);
     if (event.candidate) {
       socket.emit("webrtc-ice-candidate", {
         target: targetId,
