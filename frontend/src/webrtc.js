@@ -31,6 +31,12 @@ export function createPeerConnection({
   };
 
   peer.onconnectionstatechange = () => {
+    peer.oniceconnectionstatechange = () => {
+      console.log(
+        "ICE connection state:",
+        peer.iceConnectionState
+      );
+    };
     console.log(
       `WebRTC connection with ${targetId}:`,
       peer.connectionState
