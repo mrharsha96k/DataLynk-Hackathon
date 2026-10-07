@@ -3,15 +3,27 @@ const rtcConfig = {
     {
       urls: "stun:stun.l.google.com:19302",
     },
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
   ],
 };
 
-export function createPeerConnection({
+export const rtcConfigReady = fetch(
+  `https://datalynk.metered.live/api/v1/turn/credentials?apiKey=${import.meta.env.VITE_METERED_API_KEY}`
+)
+  .then((response) => {
+    if (!response.ok) {
+      throw new Error("Failed to fetch Metered TURN servers");
+    }
+    return response.json();
+  })
+  .then((iceServers) => {
+    rtcConfig.iceServers = iceServers;
+    console.log("Metered TURN servers loaded");
+  })
+  .catch((error) => {
+    console.error("Metered TURN error:", error);
+  });
+
+export async function createPeerConnection({
   targetId,
   socket,
   roomCode,

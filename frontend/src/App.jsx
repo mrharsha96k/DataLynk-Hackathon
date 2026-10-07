@@ -80,7 +80,7 @@ function App() {
     });
 
     // Create WebRTC connection with the student
-    const peer = createPeerConnection({
+    const peer = await createPeerConnection({
       targetId: student.id,
       socket,
       roomCode: student.roomCode,
